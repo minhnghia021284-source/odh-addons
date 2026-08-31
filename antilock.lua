@@ -1,8 +1,12 @@
+--[[
+    AntiLock.lua – ODH Addon
+    Dành cho Overdrive H
+]]
+
 local shared = odh_shared_plugins
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-
 local LocalPlayer = Players.LocalPlayer
 
 local userWantsEnabled = false
@@ -70,13 +74,11 @@ local function isIgnoredPlayerArmed()
     if not ignoreListEnabled then
         return false
     end
-
     local targets = {slot1Player, slot2Player, slot3Player}
     for _, player in ipairs(targets) do
         if player and player.Parent then
             local backpack = player:FindFirstChild("Backpack")
             local character = player.Character
-            
             if backpack then
                 for _, item in ipairs(backpack:GetChildren()) do
                     if item:IsA("Tool") then
@@ -84,7 +86,6 @@ local function isIgnoredPlayerArmed()
                     end
                 end
             end
-            
             if character then
                 for _, item in ipairs(character:GetChildren()) do
                     if item:IsA("Tool") then
@@ -102,7 +103,6 @@ local function performRoleStep(humanoid)
         local randomX = math.random() > 0.5 and 1 or -1
         local randomZ = math.random() > 0.5 and 1 or -1
         local moveDir = Vector3.new(randomX, 0, randomZ).Unit
-
         local startTime = tick()
         while tick() - startTime < 0.15 do
             if humanoid and humanoid.Parent then
@@ -153,7 +153,7 @@ local function startAntiAim()
                     local isStopped = (humanoid.MoveDirection.Magnitude == 0)
 
                     local multiplier = math.random(1, 2) == 1 and 320 or -320
-                    
+
                     if isJumping then
                         local jumpMultY = math.random(1, 2) == 1 and 250 or -250
                         hrp.AssemblyLinearVelocity = Vector3.new(multiplier, jumpMultY, multiplier)
@@ -163,7 +163,7 @@ local function startAntiAim()
                     else
                         hrp.AssemblyLinearVelocity = Vector3.new(multiplier, 0, multiplier)
                     end
-                    
+
                     RunService.RenderStepped:Wait()
                     hrp.AssemblyLinearVelocity = oldVelocity
                 end
