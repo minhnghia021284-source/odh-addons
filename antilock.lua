@@ -1,96 +1,54 @@
---[[
-    AntiLock.lua – ODH Addon
-    Dành cho Overdrive H
-]]
-
 local shared = odh_shared_plugins
 
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local LocalPlayer = Players.LocalPlayer
+local my_own_tab = shared.CreateTab("Anti Aim", "/popora4ka/Disablerendering/refs/heads/main/Antiaim")
+local my_own_section = my_own_tab:AddSection("Anti Aim", "PROTECTS YOU FROM AIMBOTS (STEALTH - NO VISUAL)")
 
-local userWantsEnabled = false
-local enabled = false
-local velocityConnection = nil
-local hadKnifeLastFrame = false
+local run_service = game:GetService("RunService")
+local players_service = game:GetService("Players")
+local local_player = players_service.LocalPlayer
 
-local ignoreListEnabled = true
-local slot1Player = nil
-local slot2Player = nil
-local slot3Player = nil
+local anti_aim = {}
+local local_parts = {}
+local local_fps = 200
+local stomping = false
+local purchasing = nil
 
-local aaSection = shared.AddSection("Anti-Aim Extension")
+local render_stepped = run_service.RenderStepped
+local render_stepped_wait = render_stepped.Wait
 
-local function getPlayerList()
-    local list = {"None"}
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            table.insert(list, p.Name)
-        end
-    end
-    return list
+local velocity_desync_type = "stealth"
+local velocity_desync_rotate = false
+
+local SAFE_RADIUS = 15
+local STEALTH_INTENSITY = 8   -- Càng nhỏ càng kín (5-15 là an toàn)
+
+local function round(num, decimals)
+    local mult = 10^(decimals or 0)
+    return math.floor(num * mult + 0.5 - (num < 0 and 1 or 0)) / mult
 end
 
-local function findPlayerByName(name)
-    if not name or name == "None" then return nil end
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p.Name == name then
-            return p
-        end
+local fake_position_sender_rate_old
+pcall(function()
+    fake_position_sender_rate_old = getfflag("S2PhysicsSenderRate")
+end)
+
+local function remove(tbl, index)
+    local length = #tbl
+    for i = index, length - 1 do
+        tbl[i] = tbl[i + 1]
     end
-    return nil
+    tbl[length] = nil
 end
 
-local function hasKnife()
-    local backpack = LocalPlayer:FindFirstChild("Backpack")
-    local character = LocalPlayer.Character
-    if backpack and backpack:FindFirstChild("Knife") then
-        return true
-    end
-    if character and character:FindFirstChild("Knife") then
-        return true
-    end
-    return false
-end
-
-local function isPlayerNearby(hrp)
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-            local otherHrp = player.Character.HumanoidRootPart
-            if (otherHrp.Position - hrp.Position).Magnitude <= 6 then
-                return true
-            end
-        end
-    end
-    return false
-end
-
-local function isInWater(humanoid)
-    local state = humanoid:GetState()
-    return state == Enum.HumanoidStateType.Swimming or humanoid.FloorMaterial == Enum.Material.Water
-end
-
-local function isIgnoredPlayerArmed()
-    if not ignoreListEnabled then
-        return false
-    end
-    local targets = {slot1Player, slot2Player, slot3Player}
-    for _, player in ipairs(targets) do
-        if player and player.Parent then
-            local backpack = player:FindFirstChild("Backpack")
-            local character = player.Character
-            if backpack then
-                for _, item in ipairs(backpack:GetChildren()) do
-                    if item:IsA("Tool") then
-                        return true
-                    end
-                end
-            end
-            if character then
-                for _, item in ipairs(character:GetChildren()) do
-                    if item:IsA("Tool") then
-                        return true
-                    end
+local function has_nearby_player(hrp, radius)
+    radius = radius or SAFE_RADIUS
+    for _, plr in ipairs(players_service:GetPlayers()) do
+        if plr ~= local_player and plr.Character then
+            local other_hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+            if other_hrp then
+                local dist = (other_hrp.Position - hrp.Position).Magnitude
+                if dist <= radius then
+                    return true
                 end
             end
         end
@@ -98,146 +56,199 @@ local function isIgnoredPlayerArmed()
     return false
 end
 
-local function performRoleStep(humanoid)
-    task.spawn(function()
-        local randomX = math.random() > 0.5 and 1 or -1
-        local randomZ = math.random() > 0.5 and 1 or -1
-        local moveDir = Vector3.new(randomX, 0, randomZ).Unit
-        local startTime = tick()
-        while tick() - startTime < 0.15 do
-            if humanoid and humanoid.Parent then
-                humanoid:Move(moveDir, false)
-            end
-            RunService.RenderStepped:Wait()
-        end
-    end)
-end
+-- =============================================
+-- STEALTH DESYNC - Không di chuyển thấy rõ
+-- =============================================
+local do_velocity_desync = function(dt, hrp)
+    if hrp and not stomping and not purchasing and (getgenv().FLING_ACTIVE or 0) == 0 then
 
-local function stopAntiAim()
-    if velocityConnection then
-        velocityConnection:Disconnect()
-        velocityConnection = nil
-    end
-end
-
-local function startAntiAim()
-    if velocityConnection then return end
-    velocityConnection = RunService.Heartbeat:Connect(function()
-        if isIgnoredPlayerArmed() then
-            if enabled then
-                enabled = false
-            end
+        -- Không desync nếu có player gần
+        if has_nearby_player(hrp, SAFE_RADIUS) then
             return
-        else
-            if userWantsEnabled and not enabled then
-                enabled = true
-            end
         end
 
-        local character = LocalPlayer.Character
-        if character and character:FindFirstChild("HumanoidRootPart") and character:FindFirstChild("Humanoid") then
-            local humanoid = character.Humanoid
-            if humanoid.Health > 0 then
-                local hrp = character.HumanoidRootPart
-                local currentlyHasKnife = hasKnife()
+        pcall(function() setfflag("S2PhysicsSenderRate", tostring(round(local_fps, 1))) end)
+        pcall(function() sethiddenproperty(hrp, "NetworkIsSleeping", false) end)
 
-                if currentlyHasKnife and not hadKnifeLastFrame then
-                    performRoleStep(humanoid)
-                end
-                hadKnifeLastFrame = currentlyHasKnife
+        local old_lin = hrp.AssemblyLinearVelocity
+        local old_ang = hrp.AssemblyAngularVelocity
+        local old_collide = hrp.CanCollide
 
-                if currentlyHasKnife and not isPlayerNearby(hrp) and not isInWater(humanoid) then
-                    local oldVelocity = hrp.AssemblyLinearVelocity
-                    local state = humanoid:GetState()
-                    local isJumping = (state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall)
-                    local isStopped = (humanoid.MoveDirection.Magnitude == 0)
+        -- =============================================
+        -- STEALTH: Chỉ di chuyển siêu nhỏ (±5-15)
+        -- Đủ phá aimbot nhưng mắt thường không thấy
+        -- =============================================
+        local intensity = STEALTH_INTENSITY
+        local vel
 
-                    local multiplier = math.random(1, 2) == 1 and 320 or -320
-
-                    if isJumping then
-                        local jumpMultY = math.random(1, 2) == 1 and 250 or -250
-                        hrp.AssemblyLinearVelocity = Vector3.new(multiplier, jumpMultY, multiplier)
-                    elseif isStopped then
-                        local stopMult = math.random(1, 2) == 1 and 400 or -400
-                        hrp.AssemblyLinearVelocity = Vector3.new(stopMult, 0, stopMult)
-                    else
-                        hrp.AssemblyLinearVelocity = Vector3.new(multiplier, 0, multiplier)
-                    end
-
-                    RunService.RenderStepped:Wait()
-                    hrp.AssemblyLinearVelocity = oldVelocity
-                end
-            end
+        if velocity_desync_type == "stealth" then
+            -- Di chuyển siêu nhỏ theo pattern ngẫu nhiên
+            vel = Vector3.new(
+                math.random(-intensity, intensity),
+                math.random(-2, 2),
+                math.random(-intensity, intensity)
+            )
+        elseif velocity_desync_type == "micro" then
+            -- Còn nhỏ hơn nữa, cực kỳ kín
+            vel = Vector3.new(
+                math.random(-4, 4),
+                0,
+                math.random(-4, 4)
+            )
+        elseif velocity_desync_type == "slide" then
+            -- Trượt nhẹ theo 1 hướng ngẫu nhiên
+            local angle = math.random() * math.pi * 2
+            vel = Vector3.new(math.cos(angle) * intensity, 0, math.sin(angle) * intensity)
+        elseif velocity_desync_type == "spin" then
+            -- Xoay nhẹ, không dịch chuyển vị trí
+            vel = old_lin
+            hrp.AssemblyAngularVelocity = Vector3.new(
+                math.random(-3, 3),
+                math.random(-3, 3),
+                math.random(-3, 3)
+            )
+        elseif velocity_desync_type == "jitter" then
+            vel = Vector3.new(
+                math.random(1,2) == 1 and -intensity or intensity,
+                0,
+                math.random(1,2) == 1 and -intensity or intensity
+            )
         else
-            hadKnifeLastFrame = false
+            vel = Vector3.new(
+                math.random(-intensity, intensity),
+                0,
+                math.random(-intensity, intensity)
+            )
         end
-    end)
+
+        -- Tắt collision để không đụng ai
+        hrp.CanCollide = false
+
+        getgenv().VELOCITY_DESYNC_UNTIL = os.clock() + 0.03
+        hrp.AssemblyLinearVelocity = vel
+
+        render_stepped_wait(render_stepped)
+
+        -- Khôi phục ngay (chỉ 1 frame)
+        hrp.AssemblyLinearVelocity = old_lin
+        hrp.AssemblyAngularVelocity = old_ang
+        hrp.CanCollide = old_collide
+
+        getgenv().VELOCITY_DESYNC_UNTIL = os.clock() + 0.01
+    end
 end
 
-aaSection:AddToggle("Enable Anti-Aim", function(bool)
-    userWantsEnabled = bool
-    enabled = bool
-    if bool then
-        startAntiAim()
-        shared.Notify("Anti-Aim Enabled", 2)
-    else
-        stopAntiAim()
-        shared.Notify("Anti-Aim Disabled", 2)
+-- =============================================
+-- SAFE MODE - Không đổi velocity, chỉ desync network packet
+-- 100% không thấy gì trên màn hình người khác
+-- =============================================
+local safe_mode = true
+
+local function do_safe_desync(dt, hrp)
+    if hrp and safe_mode then
+        -- Chỉ thay đổi tốc độ gửi packet, không đổi vị trí
+        pcall(function() setfflag("S2PhysicsSenderRate", tostring(math.random(8, 20))) end)
+        pcall(function() sethiddenproperty(hrp, "NetworkIsSleeping", false) end)
     end
-end)
-
-aaSection:AddToggle("Enable Ignore List", function(bool)
-    ignoreListEnabled = bool
-    if bool then
-        shared.Notify("Ignore List Enabled", 2)
-    else
-        shared.Notify("Ignore List Disabled", 2)
-    end
-end)
-
-local drop1, drop2, drop3
-
-local function updateDropdowns()
-    local list = getPlayerList()
-    if drop1 then drop1.Change(list) end
-    if drop2 then drop2.Change(list) end
-    if drop3 then drop3.Change(list) end
 end
 
-drop1 = aaSection:AddDropdown("Ignore Player 1", getPlayerList(), function(selected)
-    slot1Player = findPlayerByName(selected)
-    if slot1Player then
-        shared.Notify("Slot 1: " .. slot1Player.Name, 2)
+local function velocity_desync_enable(value)
+    for i = #anti_aim, 1, -1 do
+        if anti_aim[i] == do_velocity_desync or anti_aim[i] == do_safe_desync then
+            remove(anti_aim, i)
+        end
+    end
+    if value then
+        if safe_mode then
+            anti_aim[#anti_aim+1] = do_safe_desync
+        else
+            anti_aim[#anti_aim+1] = do_velocity_desync
+        end
     else
-        shared.Notify("Slot 1: None", 2)
+        pcall(function() setfflag("S2PhysicsSenderRate", fake_position_sender_rate_old or "15") end)
+    end
+end
+
+local heartbeat_conn = run_service.Heartbeat:Connect(function(dt)
+    local_fps = 1 / (os.clock() - (os.clock() - dt))
+    local hrp = local_parts["HumanoidRootPart"]
+
+    for i = 1, #anti_aim do
+        local func = anti_aim[i]
+        if func then
+            task.spawn(func, dt, hrp)
+        end
     end
 end)
 
-drop2 = aaSection:AddDropdown("Ignore Player 2", getPlayerList(), function(selected)
-    slot2Player = findPlayerByName(selected)
-    if slot2Player then
-        shared.Notify("Slot 2: " .. slot2Player.Name, 2)
+local function init_character(character)
+    if not character then return end
+    local hrp = character:WaitForChild("HumanoidRootPart", 5)
+    if hrp then
+        local_parts["HumanoidRootPart"] = hrp
+    end
+end
+
+init_character(local_player.Character)
+local char_added_conn = local_player.CharacterAdded:Connect(init_character)
+
+my_own_section:AddLabel("Credits: @anya_bts (Fixed by CAT - Stealth Mode)")
+
+-- =============================================
+-- TOGGLE SAFE MODE
+-- =============================================
+my_own_section:AddToggle("🛡️ Safe Mode (Không thấy gì)", function(state)
+    safe_mode = state
+    if state then
+        shared.Notify("🛡️ Safe Mode - Không ai thấy mày hack", 3)
     else
-        shared.Notify("Slot 2: None", 2)
+        shared.Notify("⚡ Stealth Mode - Vẫn kín nhưng mạnh hơn", 3)
     end
 end)
 
-drop3 = aaSection:AddDropdown("Ignore Player 3", getPlayerList(), function(selected)
-    slot3Player = findPlayerByName(selected)
-    if slot3Player then
-        shared.Notify("Slot 3: " .. slot3Player.Name, 2)
+my_own_section:AddToggle("enabled", function(state)
+    velocity_desync_enable(state)
+    if state then
+        shared.Notify("Anti Aim enabled", 2)
     else
-        shared.Notify("Slot 3: None", 2)
+        shared.Notify("Anti Aim disabled", 2)
     end
 end)
 
-Players.PlayerAdded:Connect(function()
-    updateDropdowns()
+-- =============================================
+-- DROPDOWN MODE - Đổi sang các mode kín
+-- =============================================
+my_own_section:AddDropdown("mode", {"stealth", "micro", "slide", "spin", "jitter"}, function(selected)
+    velocity_desync_type = selected
+    shared.Notify("Anti Aim mode: " .. selected, 2)
 end)
 
-Players.PlayerRemoving:Connect(function(player)
-    if slot1Player == player then slot1Player = nil end
-    if slot2Player == player then slot2Player = nil end
-    if slot3Player == player then slot3Player = nil end
-    updateDropdowns()
+-- =============================================
+-- SLIDER - Điều chỉnh độ mạnh (càng nhỏ càng kín)
+-- =============================================
+my_own_section:AddSlider("Stealth Intensity", 3, 20, STEALTH_INTENSITY, function(value)
+    STEALTH_INTENSITY = value
+    shared.Notify("Intensity: " .. value .. " (nhỏ = kín)", 2)
+end)
+
+my_own_section:AddToggle("rotate", function(state)
+    velocity_desync_rotate = state
+    if state then
+        shared.Notify("Rotation enabled", 2)
+    else
+        shared.Notify("Rotation disabled", 2)
+    end
+end)
+
+my_own_section:AddButton("unload", function()
+    velocity_desync_enable(false)
+    if heartbeat_conn then
+        pcall(function() heartbeat_conn:Disconnect() end)
+        heartbeat_conn = nil
+    end
+    if char_added_conn then
+        pcall(function() char_added_conn:Disconnect() end)
+        char_added_conn = nil
+    end
+    shared.Notify("Anti Aim unloaded", 2)
 end)
